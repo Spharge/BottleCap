@@ -1,7 +1,7 @@
 // app.js — Main application: Firebase, bottle library, adapter creation
 
 import { generateScad, validatePitch } from './scad.js';
-import { initPreview, updatePreview } from './preview.js';
+import { initPreview, updatePreview, exportSTL } from './preview.js';
 
 // ── Firebase Setup ──────────────────────────────────────────
 
@@ -34,7 +34,9 @@ auth.onAuthStateChanged(user => {
 // ── State ───────────────────────────────────────────────────
 
 let bottlesCache = [];
+let adaptersCache = [];
 let editingBottleId = null;
+let editingBottleData = null; // full bottle data for versioning
 
 // ── Tab Navigation ──────────────────────────────────────────
 
@@ -46,12 +48,12 @@ document.querySelectorAll('.tab').forEach(tab => {
             v.classList.toggle('active', v.id === `view-${view}`)
         );
         if (view === 'create') {
-            // Initialize preview on first switch
             if (!previewInitialized) {
                 initPreview(document.getElementById('preview-container'));
                 previewInitialized = true;
             }
             populateSelectors();
+            loadAdapters();
         }
     });
 });
@@ -69,7 +71,7 @@ async function loadBottles() {
     try {
         const snapshot = await db.collection('bottles')
             .orderBy('createdAt', 'desc')
-            .limit(100)
+            .limit(200)
             .get();
 
         bottlesCache = [];
@@ -94,6 +96,7 @@ function renderBottleGrid(bottles) {
 
     grid.innerHTML = bottles.map(b => {
         const isMine = currentUser && b.createdBy === currentUser.uid;
+        const ver = b.version ? `<span class="version-badge">v${b.version}</span>` : '';
         return `<div class="bottle-card" data-id="${b.id}">
             <div class="card-image">
                 ${b.imageUrl
@@ -102,7 +105,7 @@ function renderBottleGrid(bottles) {
                     : '<span class="placeholder">&#x1f9f4;</span>'}
             </div>
             <div class="card-body">
-                <h4>${esc(b.name)}${isMine ? ' <span class="my-badge">mine</span>' : ''}</h4>
+                <h4>${esc(b.name)}${ver}${isMine ? ' <span class="my-badge">mine</span>' : ''}</h4>
                 <div class="card-specs">
                     OD: ${b.od?.toFixed(1) || '?'}mm
                     &middot; Pitch: ${b.pitch?.toFixed(2) || '?'}mm
@@ -121,34 +124,32 @@ function renderBottleGrid(bottles) {
             const bottle = bottlesCache.find(b => b.id === card.dataset.id);
             if (!bottle) return;
             const isMine = currentUser && bottle.createdBy === currentUser.uid;
-            if (isMine) {
-                openBottleModal(bottle);
-            }
+            if (isMine) openBottleModal(bottle);
         });
     });
 }
 
-// Library search
 document.getElementById('library-search').addEventListener('input', (e) => {
     const q = e.target.value.toLowerCase();
     if (!q) { renderBottleGrid(bottlesCache); return; }
-    renderBottleGrid(bottlesCache.filter(b =>
-        b.name?.toLowerCase().includes(q)
-    ));
+    renderBottleGrid(bottlesCache.filter(b => b.name?.toLowerCase().includes(q)));
 });
 
 // ── Add/Edit Bottle Modal ───────────────────────────────────
 
 const bottleModal = document.getElementById('bottle-modal');
 
-document.getElementById('btn-add-bottle').addEventListener('click', () => {
-    openBottleModal(null);
-});
+document.getElementById('btn-add-bottle').addEventListener('click', () => openBottleModal(null));
 
 function openBottleModal(bottle) {
     editingBottleId = bottle ? bottle.id : null;
-    document.getElementById('bottle-modal-title').textContent = bottle ? 'Edit Bottle' : 'Add Bottle';
-    document.getElementById('bm-delete').style.display = bottle ? 'inline-flex' : 'none';
+    editingBottleData = bottle || null;
+
+    const isEdit = !!bottle;
+    document.getElementById('bottle-modal-title').textContent = isEdit ? `Edit Bottle (v${bottle.version || 1})` : 'Add Bottle';
+    document.getElementById('bm-delete').style.display = isEdit ? 'inline-flex' : 'none';
+    document.getElementById('bm-new-version').style.display = isEdit ? 'inline-flex' : 'none';
+    document.getElementById('bm-save').textContent = isEdit ? 'Update' : 'Save Bottle';
 
     document.getElementById('bm-name').value = bottle?.name || '';
     document.getElementById('bm-image').value = bottle?.imageUrl || '';
@@ -165,47 +166,33 @@ function openBottleModal(bottle) {
     bottleModal.classList.add('open');
 }
 
-document.getElementById('bm-cancel').addEventListener('click', () => {
-    bottleModal.classList.remove('open');
-});
+document.getElementById('bm-cancel').addEventListener('click', () => bottleModal.classList.remove('open'));
+bottleModal.addEventListener('click', (e) => { if (e.target === bottleModal) bottleModal.classList.remove('open'); });
 
-bottleModal.addEventListener('click', (e) => {
-    if (e.target === bottleModal) bottleModal.classList.remove('open');
-});
-
-// Pitch cross-validation in modal
+// Pitch cross-validation
 ['bm-pitch', 'bm-thread-width', 'bm-valley-width'].forEach(id => {
-    document.getElementById(id).addEventListener('input', () => {
-        const p = parseFloat(document.getElementById('bm-pitch').value) || 0;
-        const tw = parseFloat(document.getElementById('bm-thread-width').value) || 0;
-        const vw = parseFloat(document.getElementById('bm-valley-width').value) || 0;
-        const noteEl = document.getElementById('bm-pitch-note');
-
-        if (p > 0 && tw > 0 && vw > 0) {
-            const { pitch, warning } = validatePitch(p, tw, vw);
-            if (warning) {
-                noteEl.textContent = warning;
-                noteEl.className = 'pitch-note warn';
-            } else {
-                noteEl.textContent = `Measurements consistent -- pitch: ${pitch.toFixed(2)} mm`;
-                noteEl.className = 'pitch-note ok';
-            }
-            noteEl.style.display = 'block';
-        } else {
-            noteEl.style.display = 'none';
-        }
-    });
+    document.getElementById(id).addEventListener('input', updatePitchNote);
 });
 
-// Save bottle
-document.getElementById('bm-save').addEventListener('click', async () => {
-    if (!currentUser) {
-        showToast('Not connected. Please refresh.', 'error');
-        return;
-    }
+function updatePitchNote() {
+    const p = parseFloat(document.getElementById('bm-pitch').value) || 0;
+    const tw = parseFloat(document.getElementById('bm-thread-width').value) || 0;
+    const vw = parseFloat(document.getElementById('bm-valley-width').value) || 0;
+    const noteEl = document.getElementById('bm-pitch-note');
 
+    if (p > 0 && tw > 0 && vw > 0) {
+        const { pitch, warning } = validatePitch(p, tw, vw);
+        noteEl.textContent = warning || `Measurements consistent -- pitch: ${pitch.toFixed(2)} mm`;
+        noteEl.className = warning ? 'pitch-note warn' : 'pitch-note ok';
+        noteEl.style.display = 'block';
+    } else {
+        noteEl.style.display = 'none';
+    }
+}
+
+function collectBottleFormData() {
     const name = document.getElementById('bm-name').value.trim();
-    if (!name) { showToast('Please enter a bottle name.', 'error'); return; }
+    if (!name) { showToast('Please enter a bottle name.', 'error'); return null; }
 
     const od = parseFloat(document.getElementById('bm-od').value) || 0;
     const measuredPitch = parseFloat(document.getElementById('bm-pitch').value) || 0;
@@ -215,12 +202,12 @@ document.getElementById('bm-save').addEventListener('click', async () => {
 
     if (!od || !measuredPitch || !threadWidth || !depth) {
         showToast('Please fill in at least diameter, pitch, thread width, and depth.', 'error');
-        return;
+        return null;
     }
 
     const { pitch } = validatePitch(measuredPitch, threadWidth, valleyWidth);
 
-    const data = {
+    return {
         name,
         imageUrl: document.getElementById('bm-image').value.trim(),
         od,
@@ -232,16 +219,27 @@ document.getElementById('bm-save').addEventListener('click', async () => {
         turns: parseFloat(document.getElementById('bm-turns').value) || 2,
         wall: parseFloat(document.getElementById('bm-wall').value) || 3,
     };
+}
+
+// Save (update existing)
+document.getElementById('bm-save').addEventListener('click', async () => {
+    if (!currentUser) { showToast('Not connected. Please refresh.', 'error'); return; }
+
+    const data = collectBottleFormData();
+    if (!data) return;
 
     const btn = document.getElementById('bm-save');
     btn.disabled = true;
-    btn.textContent = 'Saving...';
 
     try {
         if (editingBottleId) {
+            // Update in place, keep same version
+            data.version = editingBottleData?.version || 1;
             await db.collection('bottles').doc(editingBottleId).update(data);
             showToast('Bottle updated.', 'success');
         } else {
+            // New bottle, version 1
+            data.version = 1;
             data.createdBy = currentUser.uid;
             data.createdAt = firebase.firestore.FieldValue.serverTimestamp();
             await db.collection('bottles').add(data);
@@ -251,11 +249,42 @@ document.getElementById('bm-save').addEventListener('click', async () => {
         bottleModal.classList.remove('open');
         await loadBottles();
     } catch (err) {
-        console.error('Save bottle error:', err);
         showToast('Failed to save: ' + err.message, 'error');
     } finally {
         btn.disabled = false;
-        btn.textContent = 'Save Bottle';
+    }
+});
+
+// Save as New Version
+document.getElementById('bm-new-version').addEventListener('click', async () => {
+    if (!currentUser) { showToast('Not connected. Please refresh.', 'error'); return; }
+
+    const data = collectBottleFormData();
+    if (!data) return;
+
+    const btn = document.getElementById('bm-new-version');
+    btn.disabled = true;
+
+    try {
+        // Find highest version of this bottle name
+        const baseName = editingBottleData?.name || data.name;
+        const existing = bottlesCache.filter(b =>
+            b.name === baseName && b.createdBy === currentUser.uid
+        );
+        const maxVersion = existing.reduce((max, b) => Math.max(max, b.version || 1), 0);
+
+        data.version = maxVersion + 1;
+        data.createdBy = currentUser.uid;
+        data.createdAt = firebase.firestore.FieldValue.serverTimestamp();
+        await db.collection('bottles').add(data);
+
+        showToast(`Saved as ${data.name} v${data.version}`, 'success');
+        bottleModal.classList.remove('open');
+        await loadBottles();
+    } catch (err) {
+        showToast('Failed to save: ' + err.message, 'error');
+    } finally {
+        btn.disabled = false;
     }
 });
 
@@ -286,14 +315,14 @@ function populateSelectors() {
     const prevB = selB.value;
 
     const options = '<option value="">-- Choose a bottle --</option>' +
-        bottlesCache.map(b =>
-            `<option value="${b.id}">${esc(b.name)} (${b.od?.toFixed(1) || '?'}mm)</option>`
-        ).join('');
+        bottlesCache.map(b => {
+            const ver = b.version ? ` v${b.version}` : '';
+            return `<option value="${b.id}">${esc(b.name)}${ver} (${b.od?.toFixed(1) || '?'}mm)</option>`;
+        }).join('');
 
     selA.innerHTML = options;
     selB.innerHTML = options;
 
-    // Restore previous selections
     if (prevA) selA.value = prevA;
     if (prevB) selB.value = prevB;
 }
@@ -306,12 +335,10 @@ function getSelectedBottle(selectId) {
 
 function showBottleSummary(summaryId, bottle) {
     const el = document.getElementById(summaryId);
-    if (!bottle) {
-        el.classList.add('hidden');
-        return;
-    }
+    if (!bottle) { el.classList.add('hidden'); return; }
 
     el.classList.remove('hidden');
+    const ver = bottle.version ? ` v${bottle.version}` : '';
     el.innerHTML = `
         <div class="summary-image">
             ${bottle.imageUrl
@@ -320,7 +347,7 @@ function showBottleSummary(summaryId, bottle) {
                 : '<span class="placeholder">&#x1f9f4;</span>'}
         </div>
         <div>
-            <div class="summary-name">${esc(bottle.name)}</div>
+            <div class="summary-name">${esc(bottle.name)}${ver}</div>
             <div class="summary-specs">
                 OD: ${bottle.od?.toFixed(1)}mm &middot;
                 Pitch: ${bottle.pitch?.toFixed(2)}mm &middot;
@@ -354,12 +381,11 @@ function onSelectionChange() {
     showBottleSummary('summary-b', bottleB);
 
     const bothSelected = bottleA && bottleB;
-    document.getElementById('btn-download').disabled = !bothSelected;
+    document.getElementById('btn-download-scad').disabled = !bothSelected;
+    document.getElementById('btn-download-stl').disabled = !bothSelected;
     document.getElementById('btn-save-adapter').disabled = !bothSelected;
 
-    if (bothSelected) {
-        refreshPreview();
-    }
+    if (bothSelected) refreshPreview();
 }
 
 document.getElementById('select-a').addEventListener('change', onSelectionChange);
@@ -387,8 +413,7 @@ function refreshPreview() {
 
         try {
             const info = updatePreview(
-                bottleToFormData(bottleA),
-                bottleToFormData(bottleB),
+                bottleToFormData(bottleA), bottleToFormData(bottleB),
                 clearance, connH
             );
 
@@ -405,7 +430,7 @@ function refreshPreview() {
 
 // ── Download .scad ──────────────────────────────────────────
 
-document.getElementById('btn-download').addEventListener('click', () => {
+document.getElementById('btn-download-scad').addEventListener('click', () => {
     const bottleA = getSelectedBottle('select-a');
     const bottleB = getSelectedBottle('select-b');
     if (!bottleA || !bottleB) return;
@@ -414,21 +439,154 @@ document.getElementById('btn-download').addEventListener('click', () => {
     const connH = parseFloat(document.getElementById('connector-h').value) || 8.0;
 
     const scadCode = generateScad(
-        bottleToFormData(bottleA),
-        bottleToFormData(bottleB),
+        bottleToFormData(bottleA), bottleToFormData(bottleB),
         clearance, connH
     );
 
-    const blob = new Blob([scadCode], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${bottleA.name}_to_${bottleB.name}.scad`.replace(/\s+/g, '_');
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadBlob(
+        new Blob([scadCode], { type: 'text/plain' }),
+        `${bottleA.name}_to_${bottleB.name}.scad`.replace(/\s+/g, '_')
+    );
 
-    showToast('OpenSCAD file downloaded. Open in OpenSCAD and press F6 to render.', 'success');
+    showToast('OpenSCAD file downloaded. Open in OpenSCAD and press F6 to render the STL.', 'success');
 });
+
+// ── Download .stl ───────────────────────────────────────────
+
+document.getElementById('btn-download-stl').addEventListener('click', () => {
+    const bottleA = getSelectedBottle('select-a');
+    const bottleB = getSelectedBottle('select-b');
+    if (!bottleA || !bottleB) return;
+
+    // Make sure preview is up to date
+    const clearance = parseFloat(document.getElementById('clearance').value) || 0.3;
+    const connH = parseFloat(document.getElementById('connector-h').value) || 8.0;
+    updatePreview(bottleToFormData(bottleA), bottleToFormData(bottleB), clearance, connH);
+
+    const blob = exportSTL();
+    if (!blob) {
+        showToast('No preview geometry to export. Select two bottles first.', 'error');
+        return;
+    }
+
+    downloadBlob(blob, `${bottleA.name}_to_${bottleB.name}.stl`.replace(/\s+/g, '_'));
+    showToast('STL downloaded! Open in your slicer (Bambu Studio, PrusaSlicer, etc.)', 'success');
+});
+
+
+// ══════════════════════════════════════════════════════════════
+// SAVED ADAPTERS
+// ══════════════════════════════════════════════════════════════
+
+async function loadAdapters() {
+    const list = document.getElementById('adapter-list');
+    list.innerHTML = '<div class="spinner"></div>';
+
+    try {
+        const snapshot = await db.collection('designs')
+            .orderBy('createdAt', 'desc')
+            .limit(50)
+            .get();
+
+        adaptersCache = [];
+        snapshot.forEach(doc => {
+            adaptersCache.push({ id: doc.id, ...doc.data() });
+        });
+
+        renderAdapterList();
+    } catch (err) {
+        console.error('Load adapters error:', err);
+        list.innerHTML = '<div class="empty-state">Could not load adapters.</div>';
+    }
+}
+
+function renderAdapterList() {
+    const list = document.getElementById('adapter-list');
+
+    if (adaptersCache.length === 0) {
+        list.innerHTML = '<div class="empty-state">No saved adapters yet.</div>';
+        return;
+    }
+
+    list.innerHTML = adaptersCache.map(a => {
+        const isMine = currentUser && a.createdBy === currentUser.uid;
+        const dateStr = a.createdAt ? new Date(a.createdAt.seconds * 1000).toLocaleDateString() : '';
+        return `<div class="adapter-item" data-id="${a.id}">
+            <div>
+                <div class="adapter-name">${esc(a.name)}${isMine ? ' <span class="my-badge">mine</span>' : ''}</div>
+                <div class="adapter-meta">${esc(a.bottleAName || '')} &harr; ${esc(a.bottleBName || '')} &middot; ${dateStr}</div>
+            </div>
+            <div class="adapter-actions">
+                <button class="btn btn-load-adapter" data-id="${a.id}">Load</button>
+                ${isMine ? `<button class="btn btn-danger btn-delete-adapter" data-id="${a.id}">Delete</button>` : ''}
+            </div>
+        </div>`;
+    }).join('');
+
+    list.querySelectorAll('.btn-load-adapter').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            loadAdapter(btn.dataset.id);
+        });
+    });
+
+    list.querySelectorAll('.btn-delete-adapter').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (confirm('Delete this adapter design?')) {
+                try {
+                    await db.collection('designs').doc(btn.dataset.id).delete();
+                    showToast('Adapter deleted.', 'success');
+                    loadAdapters();
+                } catch (err) {
+                    showToast('Delete failed: ' + err.message, 'error');
+                }
+            }
+        });
+    });
+}
+
+function loadAdapter(id) {
+    const adapter = adaptersCache.find(a => a.id === id);
+    if (!adapter) return;
+
+    // Try to select bottles by ID
+    const selA = document.getElementById('select-a');
+    const selB = document.getElementById('select-b');
+
+    let foundA = false, foundB = false;
+
+    if (adapter.bottleAId) {
+        selA.value = adapter.bottleAId;
+        if (selA.value === adapter.bottleAId) foundA = true;
+    }
+
+    if (adapter.bottleBId) {
+        selB.value = adapter.bottleBId;
+        if (selB.value === adapter.bottleBId) foundB = true;
+    }
+
+    // Fallback: try to match by name
+    if (!foundA && adapter.bottleAName) {
+        const match = bottlesCache.find(b => b.name === adapter.bottleAName);
+        if (match) { selA.value = match.id; foundA = true; }
+    }
+    if (!foundB && adapter.bottleBName) {
+        const match = bottlesCache.find(b => b.name === adapter.bottleBName);
+        if (match) { selB.value = match.id; foundB = true; }
+    }
+
+    if (adapter.clearance != null) document.getElementById('clearance').value = adapter.clearance;
+    if (adapter.connectorHeight != null) document.getElementById('connector-h').value = adapter.connectorHeight;
+
+    onSelectionChange();
+
+    if (!foundA || !foundB) {
+        showToast(`Loaded "${adapter.name}" but some bottles may have been deleted.`, 'error');
+    } else {
+        showToast(`Loaded "${adapter.name}"`, 'success');
+    }
+}
 
 // ── Save Adapter ────────────────────────────────────────────
 
@@ -444,19 +602,11 @@ document.getElementById('btn-save-adapter').addEventListener('click', () => {
     saveModal.classList.add('open');
 });
 
-document.getElementById('save-cancel').addEventListener('click', () => {
-    saveModal.classList.remove('open');
-});
-
-saveModal.addEventListener('click', (e) => {
-    if (e.target === saveModal) saveModal.classList.remove('open');
-});
+document.getElementById('save-cancel').addEventListener('click', () => saveModal.classList.remove('open'));
+saveModal.addEventListener('click', (e) => { if (e.target === saveModal) saveModal.classList.remove('open'); });
 
 document.getElementById('save-confirm').addEventListener('click', async () => {
-    if (!currentUser) {
-        showToast('Not connected. Please refresh.', 'error');
-        return;
-    }
+    if (!currentUser) { showToast('Not connected. Please refresh.', 'error'); return; }
 
     const bottleA = getSelectedBottle('select-a');
     const bottleB = getSelectedBottle('select-b');
@@ -485,6 +635,7 @@ document.getElementById('save-confirm').addEventListener('click', async () => {
 
         saveModal.classList.remove('open');
         showToast('Adapter design saved!', 'success');
+        loadAdapters();
     } catch (err) {
         showToast('Save failed: ' + err.message, 'error');
     } finally {
@@ -511,6 +662,15 @@ function sanitizeUrl(url) {
         if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.href;
     } catch {}
     return '';
+}
+
+function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
 }
 
 function showToast(message, type = 'info') {

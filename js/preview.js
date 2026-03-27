@@ -2,6 +2,7 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { computeCap } from './scad.js';
 
 let scene, camera, renderer, controls;
@@ -14,7 +15,6 @@ const COLORS = {
     connector: 0x888888,
     threadA: 0x6ab0f0,
     threadB: 0xf09a6a,
-    bore: 0x333333,
 };
 
 /**
@@ -24,24 +24,20 @@ export function initPreview(container) {
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0xf0f0f0);
 
-    // Camera
     camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 500);
     camera.position.set(40, 30, 40);
 
-    // Renderer
     renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.setPixelRatio(window.devicePixelRatio);
     container.appendChild(renderer.domElement);
 
-    // Controls
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
     controls.minDistance = 10;
     controls.maxDistance = 200;
 
-    // Lights
     const ambient = new THREE.AmbientLight(0xffffff, 0.5);
     scene.add(ambient);
 
@@ -53,15 +49,12 @@ export function initPreview(container) {
     dirLight2.position.set(-20, 20, -20);
     scene.add(dirLight2);
 
-    // Grid
     const grid = new THREE.GridHelper(80, 20, 0xcccccc, 0xe0e0e0);
     scene.add(grid);
 
-    // Axes helper
     const axes = new THREE.AxesHelper(10);
     scene.add(axes);
 
-    // Handle resize
     const resizeObserver = new ResizeObserver(() => {
         const w = container.clientWidth;
         const h = container.clientHeight;
@@ -87,7 +80,6 @@ function createTube(innerR, outerR, height, color, opacity = 0.7) {
     const shape = new THREE.Shape();
     const segs = 64;
 
-    // Outer circle
     for (let i = 0; i <= segs; i++) {
         const a = (i / segs) * Math.PI * 2;
         const x = Math.cos(a) * outerR;
@@ -96,7 +88,6 @@ function createTube(innerR, outerR, height, color, opacity = 0.7) {
         else shape.lineTo(x, y);
     }
 
-    // Inner circle (hole)
     const hole = new THREE.Path();
     for (let i = 0; i <= segs; i++) {
         const a = (i / segs) * Math.PI * 2;
@@ -120,19 +111,20 @@ function createTube(innerR, outerR, height, color, opacity = 0.7) {
     });
 
     const mesh = new THREE.Mesh(geom, mat);
-    // ExtrudeGeometry extrudes along Z in shape space; rotate so Z is up
     mesh.rotation.x = -Math.PI / 2;
     return mesh;
 }
 
 /**
- * Create helical thread visualization.
+ * Create helical thread geometry.
+ * wall_overlap extends threads into the wall for solid union in STL export.
  */
 function createHelicalThreads(bore_r, lead, starts, depth, threadWidth, engage_h, pitch, color) {
     const group = new THREE.Group();
     const segsPerTurn = 48;
     const turns = engage_h / lead;
     const totalSegs = Math.ceil(segsPerTurn * turns);
+    const wall_overlap = 1.0; // extend into wall for solid mesh
 
     const mat = new THREE.MeshPhongMaterial({
         color,
@@ -151,26 +143,24 @@ function createHelicalThreads(bore_r, lead, starts, depth, threadWidth, engage_h
             const cosA = Math.cos(angle);
             const sinA = Math.sin(angle);
 
-            // Inner edge of thread (at bore surface)
             const ri = bore_r - depth;
+            const ro = bore_r + wall_overlap; // extend past bore into wall
+
+            // 4 vertices per segment step: inner-bottom, outer-bottom, inner-top, outer-top
             vertices.push(ri * cosA, z, ri * sinA);
-
-            // Outer edge of thread (at bore radius)
-            vertices.push(bore_r * cosA, z, bore_r * sinA);
-
-            // Add axial width by duplicating at z + threadWidth
+            vertices.push(ro * cosA, z, ro * sinA);
             vertices.push(ri * cosA, z + threadWidth, ri * sinA);
-            vertices.push(bore_r * cosA, z + threadWidth, bore_r * sinA);
+            vertices.push(ro * cosA, z + threadWidth, ro * sinA);
 
             if (i < totalSegs) {
                 const base = i * 4;
                 const next = (i + 1) * 4;
 
-                // Bottom face (z side)
+                // Bottom face
                 indices.push(base, base + 1, next);
                 indices.push(next, base + 1, next + 1);
 
-                // Top face (z + threadWidth side)
+                // Top face
                 indices.push(base + 2, next + 2, base + 3);
                 indices.push(next + 2, next + 3, base + 3);
 
@@ -199,7 +189,6 @@ function createHelicalThreads(bore_r, lead, starts, depth, threadWidth, engage_h
  * Update the 3D preview with new parameters.
  */
 export function updatePreview(bottleA, bottleB, clearance, connectorH) {
-    // Remove old adapter
     if (adapterGroup) {
         scene.remove(adapterGroup);
         adapterGroup.traverse((obj) => {
@@ -219,7 +208,6 @@ export function updatePreview(bottleA, bottleB, clearance, connectorH) {
     const b_cap_h = cb.engage_h + 2.0;
     const total_h = a_cap_h + connectorH + b_cap_h;
 
-    // Center the adapter vertically
     const offsetY = -total_h / 2;
 
     // Cap A shell
@@ -240,10 +228,10 @@ export function updatePreview(bottleA, bottleB, clearance, connectorH) {
     connMesh.position.y = offsetY + a_cap_h;
     adapterGroup.add(connMesh);
 
-    // Cap B shell (flipped — opening faces up)
+    // Cap B shell (flipped)
     const capBMesh = createTube(cb.bore_r, cb.outer_r, b_cap_h, COLORS.capB, 0.6);
     capBMesh.position.y = offsetY + a_cap_h + connectorH + b_cap_h;
-    capBMesh.rotation.x = Math.PI / 2; // flip
+    capBMesh.rotation.x = Math.PI / 2;
     adapterGroup.add(capBMesh);
 
     // Cap B threads (flipped)
@@ -251,18 +239,47 @@ export function updatePreview(bottleA, bottleB, clearance, connectorH) {
         cb.bore_r, cb.lead, cb.starts, cb.depth,
         cb.thread_width, cb.engage_h, cb.pitch, COLORS.threadB
     );
-    // Flip B threads: mirror in Y
     threadsB.scale.y = -1;
     threadsB.position.y = offsetY + a_cap_h + connectorH + b_cap_h;
     adapterGroup.add(threadsB);
 
     scene.add(adapterGroup);
 
-    // Adjust camera to fit
     const dist = Math.max(total_h, conn_r * 2) * 2.2;
     camera.position.set(dist * 0.7, dist * 0.5, dist * 0.7);
     controls.target.set(0, 0, 0);
     controls.update();
 
     return { total_h, a_cap_h, b_cap_h, conn_r, flow_r };
+}
+
+/**
+ * Export the current adapter geometry as a binary STL file.
+ * Returns a Blob, or null if no adapter is loaded.
+ */
+export function exportSTL() {
+    if (!adapterGroup) return null;
+
+    // Clone the group and make all materials opaque for export
+    const exportGroup = adapterGroup.clone();
+    exportGroup.traverse((obj) => {
+        if (obj.material) {
+            obj.material = obj.material.clone();
+            obj.material.transparent = false;
+            obj.material.opacity = 1.0;
+        }
+    });
+
+    // Apply all transforms to geometry so the STL has correct positions
+    exportGroup.updateMatrixWorld(true);
+
+    const exporter = new STLExporter();
+    const stlBuffer = exporter.parse(exportGroup, { binary: true });
+
+    // Clean up cloned materials
+    exportGroup.traverse((obj) => {
+        if (obj.material) obj.material.dispose();
+    });
+
+    return new Blob([stlBuffer], { type: 'application/octet-stream' });
 }

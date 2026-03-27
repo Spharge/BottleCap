@@ -417,15 +417,61 @@ nav {
 .preview-stats .stat { color: var(--text-secondary); }
 .preview-stats .stat strong { color: var(--text); }
 
-.preview-placeholder {
+/* ── Adapter List ───────────────────────────────── */
+
+.adapter-list {
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.adapter-item {
     display: flex;
     align-items: center;
-    justify-content: center;
-    height: 100%;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 6px;
+    background: var(--bg);
+    cursor: pointer;
+    transition: border-color 0.15s;
+    font-size: 0.82rem;
+}
+
+.adapter-item:hover {
+    border-color: var(--accent);
+}
+
+.adapter-item .adapter-name {
+    font-weight: 600;
+}
+
+.adapter-item .adapter-meta {
     color: var(--text-hint);
-    font-size: 0.9rem;
-    text-align: center;
-    padding: 20px;
+    font-size: 0.75rem;
+}
+
+.adapter-item .adapter-actions {
+    display: flex;
+    gap: 4px;
+}
+
+.adapter-item .adapter-actions .btn {
+    padding: 3px 10px;
+    font-size: 0.72rem;
+}
+
+/* ── Version Badge ──────────────────────────────── */
+
+.version-badge {
+    background: #e8e8e8;
+    color: var(--text-secondary);
+    font-size: 0.6rem;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-weight: 600;
+    text-transform: uppercase;
+    margin-left: 4px;
 }
 
 /* ── Modal ──────────────────────────────────────── */

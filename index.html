@@ -77,17 +77,23 @@
 
             <div class="section-divider">Settings</div>
             <div class="form-row">
-                <label title="Extra gap added to bore diameter for FDM printing fit. 0.3 mm is typical.">Clearance (mm)</label>
+                <label title="Extra gap for FDM printing fit. 0.3 mm is typical.">Clearance (mm)</label>
                 <input type="number" id="clearance" step="0.05" min="0" max="2" value="0.3">
             </div>
             <div class="form-row">
-                <label title="The solid middle section between caps. Taller = easier to grip.">Connector Height (mm)</label>
+                <label title="Solid middle section between caps. Taller = easier to grip.">Connector Height (mm)</label>
                 <input type="number" id="connector-h" step="1" min="0" max="100" value="8">
             </div>
 
             <div class="form-actions">
-                <button id="btn-download" class="btn" disabled>Download .scad</button>
+                <button id="btn-download-scad" class="btn" disabled>Download .scad</button>
+                <button id="btn-download-stl" class="btn btn-primary" disabled>Download .stl</button>
                 <button id="btn-save-adapter" class="btn btn-success" disabled>Save Adapter</button>
+            </div>
+
+            <div class="section-divider">Saved Adapters</div>
+            <div id="adapter-list" class="adapter-list">
+                <div class="empty-state">No saved adapters yet.</div>
             </div>
         </div>
 
@@ -126,35 +132,35 @@
 
         <div class="modal-grid">
             <div class="form-row">
-                <label title="Measure across the widest point of the threads on the bottle neck (peak to peak).">Thread Diameter</label>
+                <label title="Measure across widest point of threads (peak to peak).">Thread Diameter</label>
                 <input type="number" id="bm-od" step="0.1" min="5" max="200" placeholder="e.g. 28.5">
             </div>
             <div class="form-row">
-                <label title="Distance between two adjacent thread peaks (crest to crest).">Thread Pitch</label>
+                <label title="Distance between adjacent thread peaks (crest to crest).">Thread Pitch</label>
                 <input type="number" id="bm-pitch" step="0.01" min="0.5" max="20" placeholder="e.g. 3.8">
             </div>
             <div class="form-row">
-                <label title="Width of a single thread ridge -- the solid raised part only.">Thread Width</label>
+                <label title="Width of a single thread ridge -- solid raised part only.">Thread Width</label>
                 <input type="number" id="bm-thread-width" step="0.01" min="0.3" max="20" placeholder="e.g. 2.3">
             </div>
             <div class="form-row">
-                <label title="Width of the gap between two adjacent thread ridges.">Valley Width</label>
+                <label title="Width of gap between adjacent thread ridges.">Valley Width</label>
                 <input type="number" id="bm-valley-width" step="0.01" min="0.1" max="20" placeholder="e.g. 2.0">
             </div>
             <div class="form-row">
-                <label title="Usually 1. Count separate thread beginnings at top of neck.">Thread Starts</label>
+                <label title="Usually 1. Count thread beginnings at top of neck.">Thread Starts</label>
                 <input type="number" id="bm-starts" step="1" min="1" max="8" value="1">
             </div>
             <div class="form-row">
-                <label title="Height of thread ridge from neck surface to top.">Thread Depth</label>
+                <label title="Height of thread ridge from neck surface.">Thread Depth</label>
                 <input type="number" id="bm-depth" step="0.01" min="0.1" max="5" placeholder="e.g. 1.2">
             </div>
             <div class="form-row">
-                <label title="Full rotations to screw on the cap.">Engagement Turns</label>
+                <label title="Full rotations to screw on cap.">Engagement Turns</label>
                 <input type="number" id="bm-turns" step="0.5" min="0.5" max="10" value="2">
             </div>
             <div class="form-row">
-                <label title="Cap wall thickness beyond threads. 3 mm default.">Wall Thickness</label>
+                <label title="Cap wall thickness beyond threads.">Wall Thickness</label>
                 <input type="number" id="bm-wall" step="0.5" min="1" max="20" value="3">
             </div>
         </div>
@@ -164,6 +170,7 @@
         <div class="modal-actions">
             <button id="bm-cancel" class="btn">Cancel</button>
             <button id="bm-delete" class="btn btn-danger" style="display:none;">Delete</button>
+            <button id="bm-new-version" class="btn" style="display:none;">Save as New Version</button>
             <button id="bm-save" class="btn btn-primary">Save Bottle</button>
         </div>
     </div>
