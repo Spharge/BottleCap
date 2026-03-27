@@ -1,4 +1,4 @@
-// app.js — Main application: Firebase, form handling, gallery
+// app.js — Main application: Firebase, bottle library, adapter creation
 
 import { generateScad, validatePitch } from './scad.js';
 import { initPreview, updatePreview } from './preview.js';
@@ -28,39 +28,161 @@ auth.signInAnonymously().catch(err => {
 
 auth.onAuthStateChanged(user => {
     currentUser = user;
+    if (user) loadBottles();
 });
 
-// ── DOM References ──────────────────────────────────────────
+// ── State ───────────────────────────────────────────────────
 
-const saveModal = document.getElementById('save-modal');
-const galleryModal = document.getElementById('gallery-modal');
-const toastContainer = document.getElementById('toast-container');
+let bottlesCache = [];
+let editingBottleId = null;
 
-// ── Form Data Collection ────────────────────────────────────
+// ── Tab Navigation ──────────────────────────────────────────
 
-function getBottleData(prefix) {
-    const get = (id) => {
-        const el = document.getElementById(`${prefix}-${id}`);
-        return el ? parseFloat(el.value) || 0 : 0;
-    };
-    const getInt = (id) => {
-        const el = document.getElementById(`${prefix}-${id}`);
-        return el ? parseInt(el.value) || 1 : 1;
-    };
-    const getStr = (id) => {
-        const el = document.getElementById(`${prefix}-${id}`);
-        return el ? el.value.trim() : '';
-    };
+document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+        const view = tab.dataset.view;
+        document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === tab));
+        document.querySelectorAll('.view').forEach(v =>
+            v.classList.toggle('active', v.id === `view-${view}`)
+        );
+        if (view === 'create') {
+            // Initialize preview on first switch
+            if (!previewInitialized) {
+                initPreview(document.getElementById('preview-container'));
+                previewInitialized = true;
+            }
+            populateSelectors();
+        }
+    });
+});
 
-    const measuredPitch = get('pitch');
-    const threadWidth = get('thread-width');
-    const valleyWidth = get('valley-width');
+let previewInitialized = false;
 
-    const { pitch, warning } = validatePitch(measuredPitch, threadWidth, valleyWidth);
+// ══════════════════════════════════════════════════════════════
+// BOTTLE LIBRARY
+// ══════════════════════════════════════════════════════════════
 
-    const noteEl = document.getElementById(`${prefix}-pitch-note`);
-    if (noteEl) {
-        if (measuredPitch > 0 && threadWidth > 0 && valleyWidth > 0) {
+async function loadBottles() {
+    const grid = document.getElementById('bottle-grid');
+    grid.innerHTML = '<div class="spinner"></div>';
+
+    try {
+        const snapshot = await db.collection('bottles')
+            .orderBy('createdAt', 'desc')
+            .limit(100)
+            .get();
+
+        bottlesCache = [];
+        snapshot.forEach(doc => {
+            bottlesCache.push({ id: doc.id, ...doc.data() });
+        });
+
+        renderBottleGrid(bottlesCache);
+    } catch (err) {
+        console.error('Load bottles error:', err);
+        grid.innerHTML = '<div class="empty-state">Could not load bottles. Check Firestore rules.</div>';
+    }
+}
+
+function renderBottleGrid(bottles) {
+    const grid = document.getElementById('bottle-grid');
+
+    if (bottles.length === 0) {
+        grid.innerHTML = '<div class="empty-state">No bottles yet. Click "+ Add Bottle" to save your first bottle.</div>';
+        return;
+    }
+
+    grid.innerHTML = bottles.map(b => {
+        const isMine = currentUser && b.createdBy === currentUser.uid;
+        return `<div class="bottle-card" data-id="${b.id}">
+            <div class="card-image">
+                ${b.imageUrl
+                    ? `<img src="${sanitizeUrl(b.imageUrl)}" alt="${esc(b.name)}" loading="lazy"
+                           onerror="this.parentElement.innerHTML='<span class=placeholder>&#x1f9f4;</span>'">`
+                    : '<span class="placeholder">&#x1f9f4;</span>'}
+            </div>
+            <div class="card-body">
+                <h4>${esc(b.name)}${isMine ? ' <span class="my-badge">mine</span>' : ''}</h4>
+                <div class="card-specs">
+                    OD: ${b.od?.toFixed(1) || '?'}mm
+                    &middot; Pitch: ${b.pitch?.toFixed(2) || '?'}mm
+                    &middot; Starts: ${b.starts || '?'}
+                </div>
+            </div>
+            <div class="card-footer">
+                <span>${b.createdAt ? new Date(b.createdAt.seconds * 1000).toLocaleDateString() : ''}</span>
+                ${isMine ? '<span style="color:var(--accent);font-size:0.75rem;">Click to edit</span>' : ''}
+            </div>
+        </div>`;
+    }).join('');
+
+    grid.querySelectorAll('.bottle-card').forEach(card => {
+        card.addEventListener('click', () => {
+            const bottle = bottlesCache.find(b => b.id === card.dataset.id);
+            if (!bottle) return;
+            const isMine = currentUser && bottle.createdBy === currentUser.uid;
+            if (isMine) {
+                openBottleModal(bottle);
+            }
+        });
+    });
+}
+
+// Library search
+document.getElementById('library-search').addEventListener('input', (e) => {
+    const q = e.target.value.toLowerCase();
+    if (!q) { renderBottleGrid(bottlesCache); return; }
+    renderBottleGrid(bottlesCache.filter(b =>
+        b.name?.toLowerCase().includes(q)
+    ));
+});
+
+// ── Add/Edit Bottle Modal ───────────────────────────────────
+
+const bottleModal = document.getElementById('bottle-modal');
+
+document.getElementById('btn-add-bottle').addEventListener('click', () => {
+    openBottleModal(null);
+});
+
+function openBottleModal(bottle) {
+    editingBottleId = bottle ? bottle.id : null;
+    document.getElementById('bottle-modal-title').textContent = bottle ? 'Edit Bottle' : 'Add Bottle';
+    document.getElementById('bm-delete').style.display = bottle ? 'inline-flex' : 'none';
+
+    document.getElementById('bm-name').value = bottle?.name || '';
+    document.getElementById('bm-image').value = bottle?.imageUrl || '';
+    document.getElementById('bm-od').value = bottle?.od || '';
+    document.getElementById('bm-pitch').value = bottle?.pitch || '';
+    document.getElementById('bm-thread-width').value = bottle?.threadWidth || '';
+    document.getElementById('bm-valley-width').value = bottle?.valleyWidth || '';
+    document.getElementById('bm-starts').value = bottle?.starts || 1;
+    document.getElementById('bm-depth').value = bottle?.depth || '';
+    document.getElementById('bm-turns').value = bottle?.turns || 2;
+    document.getElementById('bm-wall').value = bottle?.wall || 3;
+    document.getElementById('bm-pitch-note').style.display = 'none';
+
+    bottleModal.classList.add('open');
+}
+
+document.getElementById('bm-cancel').addEventListener('click', () => {
+    bottleModal.classList.remove('open');
+});
+
+bottleModal.addEventListener('click', (e) => {
+    if (e.target === bottleModal) bottleModal.classList.remove('open');
+});
+
+// Pitch cross-validation in modal
+['bm-pitch', 'bm-thread-width', 'bm-valley-width'].forEach(id => {
+    document.getElementById(id).addEventListener('input', () => {
+        const p = parseFloat(document.getElementById('bm-pitch').value) || 0;
+        const tw = parseFloat(document.getElementById('bm-thread-width').value) || 0;
+        const vw = parseFloat(document.getElementById('bm-valley-width').value) || 0;
+        const noteEl = document.getElementById('bm-pitch-note');
+
+        if (p > 0 && tw > 0 && vw > 0) {
+            const { pitch, warning } = validatePitch(p, tw, vw);
             if (warning) {
                 noteEl.textContent = warning;
                 noteEl.className = 'pitch-note warn';
@@ -72,52 +194,202 @@ function getBottleData(prefix) {
         } else {
             noteEl.style.display = 'none';
         }
+    });
+});
+
+// Save bottle
+document.getElementById('bm-save').addEventListener('click', async () => {
+    if (!currentUser) {
+        showToast('Not connected. Please refresh.', 'error');
+        return;
     }
 
-    return {
-        label: getStr('label') || (prefix === 'a' ? 'Bottle A' : 'Bottle B'),
-        od: get('od'),
+    const name = document.getElementById('bm-name').value.trim();
+    if (!name) { showToast('Please enter a bottle name.', 'error'); return; }
+
+    const od = parseFloat(document.getElementById('bm-od').value) || 0;
+    const measuredPitch = parseFloat(document.getElementById('bm-pitch').value) || 0;
+    const threadWidth = parseFloat(document.getElementById('bm-thread-width').value) || 0;
+    const valleyWidth = parseFloat(document.getElementById('bm-valley-width').value) || 0;
+    const depth = parseFloat(document.getElementById('bm-depth').value) || 0;
+
+    if (!od || !measuredPitch || !threadWidth || !depth) {
+        showToast('Please fill in at least diameter, pitch, thread width, and depth.', 'error');
+        return;
+    }
+
+    const { pitch } = validatePitch(measuredPitch, threadWidth, valleyWidth);
+
+    const data = {
+        name,
+        imageUrl: document.getElementById('bm-image').value.trim(),
+        od,
         pitch: pitch > 0 ? pitch : measuredPitch,
-        threadWidth: threadWidth,
-        valleyWidth: valleyWidth,
-        starts: getInt('starts'),
-        depth: get('depth'),
-        turns: get('turns'),
-        wall: get('wall'),
+        threadWidth,
+        valleyWidth,
+        starts: parseInt(document.getElementById('bm-starts').value) || 1,
+        depth,
+        turns: parseFloat(document.getElementById('bm-turns').value) || 2,
+        wall: parseFloat(document.getElementById('bm-wall').value) || 3,
     };
+
+    const btn = document.getElementById('bm-save');
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+
+    try {
+        if (editingBottleId) {
+            await db.collection('bottles').doc(editingBottleId).update(data);
+            showToast('Bottle updated.', 'success');
+        } else {
+            data.createdBy = currentUser.uid;
+            data.createdAt = firebase.firestore.FieldValue.serverTimestamp();
+            await db.collection('bottles').add(data);
+            showToast('Bottle saved!', 'success');
+        }
+
+        bottleModal.classList.remove('open');
+        await loadBottles();
+    } catch (err) {
+        console.error('Save bottle error:', err);
+        showToast('Failed to save: ' + err.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Save Bottle';
+    }
+});
+
+// Delete bottle
+document.getElementById('bm-delete').addEventListener('click', async () => {
+    if (!editingBottleId) return;
+    if (!confirm('Delete this bottle? This cannot be undone.')) return;
+
+    try {
+        await db.collection('bottles').doc(editingBottleId).delete();
+        showToast('Bottle deleted.', 'success');
+        bottleModal.classList.remove('open');
+        await loadBottles();
+    } catch (err) {
+        showToast('Delete failed: ' + err.message, 'error');
+    }
+});
+
+
+// ══════════════════════════════════════════════════════════════
+// CREATE ADAPTER
+// ══════════════════════════════════════════════════════════════
+
+function populateSelectors() {
+    const selA = document.getElementById('select-a');
+    const selB = document.getElementById('select-b');
+    const prevA = selA.value;
+    const prevB = selB.value;
+
+    const options = '<option value="">-- Choose a bottle --</option>' +
+        bottlesCache.map(b =>
+            `<option value="${b.id}">${esc(b.name)} (${b.od?.toFixed(1) || '?'}mm)</option>`
+        ).join('');
+
+    selA.innerHTML = options;
+    selB.innerHTML = options;
+
+    // Restore previous selections
+    if (prevA) selA.value = prevA;
+    if (prevB) selB.value = prevB;
 }
 
-function getFormData() {
+function getSelectedBottle(selectId) {
+    const id = document.getElementById(selectId).value;
+    if (!id) return null;
+    return bottlesCache.find(b => b.id === id) || null;
+}
+
+function showBottleSummary(summaryId, bottle) {
+    const el = document.getElementById(summaryId);
+    if (!bottle) {
+        el.classList.add('hidden');
+        return;
+    }
+
+    el.classList.remove('hidden');
+    el.innerHTML = `
+        <div class="summary-image">
+            ${bottle.imageUrl
+                ? `<img src="${sanitizeUrl(bottle.imageUrl)}" alt="${esc(bottle.name)}"
+                       onerror="this.parentElement.innerHTML='<span class=placeholder>&#x1f9f4;</span>'">`
+                : '<span class="placeholder">&#x1f9f4;</span>'}
+        </div>
+        <div>
+            <div class="summary-name">${esc(bottle.name)}</div>
+            <div class="summary-specs">
+                OD: ${bottle.od?.toFixed(1)}mm &middot;
+                Pitch: ${bottle.pitch?.toFixed(2)}mm &middot;
+                Depth: ${bottle.depth?.toFixed(2)}mm<br>
+                Width: ${bottle.threadWidth?.toFixed(2)}mm &middot;
+                Starts: ${bottle.starts} &middot;
+                Turns: ${bottle.turns}
+            </div>
+        </div>`;
+}
+
+function bottleToFormData(bottle) {
     return {
-        bottleA: getBottleData('a'),
-        bottleB: getBottleData('b'),
-        clearance: parseFloat(document.getElementById('clearance').value) || 0.3,
-        connectorHeight: parseFloat(document.getElementById('connector-h').value) || 8.0,
+        label: bottle.name || 'Bottle',
+        od: bottle.od || 0,
+        pitch: bottle.pitch || 0,
+        threadWidth: bottle.threadWidth || 0,
+        valleyWidth: bottle.valleyWidth || 0,
+        starts: bottle.starts || 1,
+        depth: bottle.depth || 0,
+        turns: bottle.turns || 2,
+        wall: bottle.wall || 3,
     };
 }
 
-function isFormValid(data) {
-    const isBottleValid = (b) => (
-        b.od > 0 && b.pitch > 0 && b.threadWidth > 0 &&
-        b.starts >= 1 && b.depth > 0 && b.turns > 0 && b.wall > 0
-    );
-    return isBottleValid(data.bottleA) && isBottleValid(data.bottleB);
+function onSelectionChange() {
+    const bottleA = getSelectedBottle('select-a');
+    const bottleB = getSelectedBottle('select-b');
+
+    showBottleSummary('summary-a', bottleA);
+    showBottleSummary('summary-b', bottleB);
+
+    const bothSelected = bottleA && bottleB;
+    document.getElementById('btn-download').disabled = !bothSelected;
+    document.getElementById('btn-save-adapter').disabled = !bothSelected;
+
+    if (bothSelected) {
+        refreshPreview();
+    }
 }
 
-// ── Preview Update ──────────────────────────────────────────
+document.getElementById('select-a').addEventListener('change', onSelectionChange);
+document.getElementById('select-b').addEventListener('change', onSelectionChange);
+document.getElementById('clearance').addEventListener('input', () => {
+    if (getSelectedBottle('select-a') && getSelectedBottle('select-b')) refreshPreview();
+});
+document.getElementById('connector-h').addEventListener('input', () => {
+    if (getSelectedBottle('select-a') && getSelectedBottle('select-b')) refreshPreview();
+});
+
+// ── Preview ─────────────────────────────────────────────────
 
 let previewDebounce = null;
 
 function refreshPreview() {
     clearTimeout(previewDebounce);
     previewDebounce = setTimeout(() => {
-        const data = getFormData();
-        if (!isFormValid(data)) return;
+        const bottleA = getSelectedBottle('select-a');
+        const bottleB = getSelectedBottle('select-b');
+        if (!bottleA || !bottleB) return;
+
+        const clearance = parseFloat(document.getElementById('clearance').value) || 0.3;
+        const connH = parseFloat(document.getElementById('connector-h').value) || 8.0;
 
         try {
             const info = updatePreview(
-                data.bottleA, data.bottleB,
-                data.clearance, data.connectorHeight
+                bottleToFormData(bottleA),
+                bottleToFormData(bottleB),
+                clearance, connH
             );
 
             document.getElementById('stat-height').textContent = info.total_h.toFixed(1) + ' mm';
@@ -128,64 +400,47 @@ function refreshPreview() {
         } catch (err) {
             console.error('Preview error:', err);
         }
-    }, 300);
+    }, 200);
 }
 
-// Listen to all form inputs for live preview
-document.querySelectorAll('.form-panel input').forEach(input => {
-    input.addEventListener('input', refreshPreview);
-});
-
-// Generate button also refreshes preview
-document.getElementById('btn-generate').addEventListener('click', () => {
-    const data = getFormData();
-    if (!isFormValid(data)) {
-        showToast('Please fill in all measurements for both bottles.', 'error');
-        return;
-    }
-    refreshPreview();
-    showToast('Preview updated.', 'success');
-});
-
-// ── SCAD Download ───────────────────────────────────────────
+// ── Download .scad ──────────────────────────────────────────
 
 document.getElementById('btn-download').addEventListener('click', () => {
-    const data = getFormData();
-    if (!isFormValid(data)) {
-        showToast('Please fill in all measurements for both bottles.', 'error');
-        return;
-    }
+    const bottleA = getSelectedBottle('select-a');
+    const bottleB = getSelectedBottle('select-b');
+    if (!bottleA || !bottleB) return;
+
+    const clearance = parseFloat(document.getElementById('clearance').value) || 0.3;
+    const connH = parseFloat(document.getElementById('connector-h').value) || 8.0;
 
     const scadCode = generateScad(
-        data.bottleA, data.bottleB,
-        data.clearance, data.connectorHeight
+        bottleToFormData(bottleA),
+        bottleToFormData(bottleB),
+        clearance, connH
     );
 
     const blob = new Blob([scadCode], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'adapter.scad';
+    a.download = `${bottleA.name}_to_${bottleB.name}.scad`.replace(/\s+/g, '_');
     a.click();
     URL.revokeObjectURL(url);
 
     showToast('OpenSCAD file downloaded. Open in OpenSCAD and press F6 to render.', 'success');
 });
 
-// ── Save Design ─────────────────────────────────────────────
+// ── Save Adapter ────────────────────────────────────────────
 
-document.getElementById('btn-save').addEventListener('click', () => {
-    const data = getFormData();
-    if (!isFormValid(data)) {
-        showToast('Please fill in all measurements before saving.', 'error');
-        return;
-    }
+const saveModal = document.getElementById('save-modal');
 
-    document.getElementById('save-name').value =
-        `${data.bottleA.label} to ${data.bottleB.label}`;
+document.getElementById('btn-save-adapter').addEventListener('click', () => {
+    const bottleA = getSelectedBottle('select-a');
+    const bottleB = getSelectedBottle('select-b');
+    if (!bottleA || !bottleB) return;
+
+    document.getElementById('save-name').value = `${bottleA.name} to ${bottleB.name}`;
     document.getElementById('save-desc').value = '';
-    document.getElementById('save-image').value = '';
-
     saveModal.classList.add('open');
 });
 
@@ -199,19 +454,16 @@ saveModal.addEventListener('click', (e) => {
 
 document.getElementById('save-confirm').addEventListener('click', async () => {
     if (!currentUser) {
-        showToast('Not connected to cloud. Please refresh and try again.', 'error');
+        showToast('Not connected. Please refresh.', 'error');
         return;
     }
 
-    const data = getFormData();
+    const bottleA = getSelectedBottle('select-a');
+    const bottleB = getSelectedBottle('select-b');
+    if (!bottleA || !bottleB) return;
+
     const name = document.getElementById('save-name').value.trim();
-    const description = document.getElementById('save-desc').value.trim();
-    const imageUrl = document.getElementById('save-image').value.trim();
-
-    if (!name) {
-        showToast('Please enter a design name.', 'error');
-        return;
-    }
+    if (!name) { showToast('Please enter a name.', 'error'); return; }
 
     const btn = document.getElementById('save-confirm');
     btn.disabled = true;
@@ -220,183 +472,31 @@ document.getElementById('save-confirm').addEventListener('click', async () => {
     try {
         await db.collection('designs').add({
             name,
-            description,
-            imageUrl,
-            bottleA: data.bottleA,
-            bottleB: data.bottleB,
-            clearance: data.clearance,
-            connectorHeight: data.connectorHeight,
+            description: document.getElementById('save-desc').value.trim(),
+            bottleAId: bottleA.id,
+            bottleBId: bottleB.id,
+            bottleAName: bottleA.name,
+            bottleBName: bottleB.name,
+            clearance: parseFloat(document.getElementById('clearance').value) || 0.3,
+            connectorHeight: parseFloat(document.getElementById('connector-h').value) || 8.0,
             createdBy: currentUser.uid,
             createdAt: firebase.firestore.FieldValue.serverTimestamp(),
         });
 
         saveModal.classList.remove('open');
-        showToast('Design saved to community gallery!', 'success');
+        showToast('Adapter design saved!', 'success');
     } catch (err) {
-        console.error('Save error:', err);
-        showToast('Failed to save: ' + err.message, 'error');
+        showToast('Save failed: ' + err.message, 'error');
     } finally {
         btn.disabled = false;
         btn.textContent = 'Save';
     }
 });
 
-// ── Gallery (Modal) ─────────────────────────────────────────
 
-let galleryCache = [];
-
-document.getElementById('btn-load').addEventListener('click', () => {
-    galleryModal.classList.add('open');
-    loadGallery();
-});
-
-document.getElementById('gallery-close').addEventListener('click', () => {
-    galleryModal.classList.remove('open');
-});
-
-galleryModal.addEventListener('click', (e) => {
-    if (e.target === galleryModal) galleryModal.classList.remove('open');
-});
-
-async function loadGallery() {
-    const grid = document.getElementById('gallery-grid');
-    grid.innerHTML = '<div class="spinner"></div>';
-
-    try {
-        const snapshot = await db.collection('designs')
-            .orderBy('createdAt', 'desc')
-            .limit(50)
-            .get();
-
-        galleryCache = [];
-        snapshot.forEach(doc => {
-            galleryCache.push({ id: doc.id, ...doc.data() });
-        });
-
-        renderGallery(galleryCache);
-    } catch (err) {
-        console.error('Gallery load error:', err);
-        grid.innerHTML = `<div class="empty-state">
-            <p>Could not load designs. Check your connection and Firestore rules.</p>
-        </div>`;
-    }
-}
-
-function renderGallery(designs) {
-    const grid = document.getElementById('gallery-grid');
-
-    if (designs.length === 0) {
-        grid.innerHTML = `<div class="empty-state">
-            <p>No designs yet. Be the first to save one!</p>
-        </div>`;
-        return;
-    }
-
-    grid.innerHTML = designs.map(d => {
-        const isMine = currentUser && d.createdBy === currentUser.uid;
-        const aOD = d.bottleA?.od?.toFixed(1) || '?';
-        const bOD = d.bottleB?.od?.toFixed(1) || '?';
-        const dateStr = d.createdAt
-            ? new Date(d.createdAt.seconds * 1000).toLocaleDateString()
-            : '';
-
-        return `<div class="design-card" data-id="${d.id}">
-            <div class="card-image">
-                ${d.imageUrl
-                    ? `<img src="${sanitizeUrl(d.imageUrl)}" alt="${esc(d.name)}" loading="lazy"
-                           onerror="this.parentElement.innerHTML='<span class=placeholder>&#x1f9f4;</span>'">`
-                    : '<span class="placeholder">&#x1f9f4;</span>'}
-            </div>
-            <div class="card-body">
-                <h4>${esc(d.name)}${isMine ? ' <span class="my-badge">mine</span>' : ''}</h4>
-                <div class="card-specs">A: ${aOD}mm | B: ${bOD}mm</div>
-            </div>
-            <div class="card-footer">
-                <span>${dateStr}</span>
-                <div style="display:flex;gap:4px;">
-                    <button class="btn btn-load" data-id="${d.id}">Load</button>
-                    ${isMine ? `<button class="btn btn-danger btn-delete" data-id="${d.id}">Delete</button>` : ''}
-                </div>
-            </div>
-        </div>`;
-    }).join('');
-
-    grid.querySelectorAll('.btn-load').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            loadDesign(btn.dataset.id);
-        });
-    });
-
-    grid.querySelectorAll('.btn-delete').forEach(btn => {
-        btn.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            if (confirm('Delete this design?')) {
-                await deleteDesign(btn.dataset.id);
-            }
-        });
-    });
-}
-
-function loadDesign(id) {
-    const design = galleryCache.find(d => d.id === id);
-    if (!design) return;
-
-    populateBottle('a', design.bottleA);
-    populateBottle('b', design.bottleB);
-
-    document.getElementById('clearance').value = design.clearance ?? 0.3;
-    document.getElementById('connector-h').value = design.connectorHeight ?? 8.0;
-
-    galleryModal.classList.remove('open');
-    refreshPreview();
-    showToast(`Loaded "${design.name}"`, 'success');
-}
-
-function populateBottle(prefix, data) {
-    if (!data) return;
-    const set = (id, val) => {
-        const el = document.getElementById(`${prefix}-${id}`);
-        if (el && val != null) el.value = val;
-    };
-
-    set('label', data.label);
-    set('od', data.od);
-    set('pitch', data.pitch);
-    set('thread-width', data.threadWidth);
-    set('valley-width', data.valleyWidth);
-    set('starts', data.starts);
-    set('depth', data.depth);
-    set('turns', data.turns);
-    set('wall', data.wall);
-}
-
-async function deleteDesign(id) {
-    try {
-        await db.collection('designs').doc(id).delete();
-        showToast('Design deleted.', 'success');
-        loadGallery();
-    } catch (err) {
-        showToast('Delete failed: ' + err.message, 'error');
-    }
-}
-
-document.getElementById('gallery-search').addEventListener('input', (e) => {
-    const query = e.target.value.toLowerCase();
-    if (!query) {
-        renderGallery(galleryCache);
-        return;
-    }
-    const filtered = galleryCache.filter(d =>
-        d.name?.toLowerCase().includes(query) ||
-        d.description?.toLowerCase().includes(query) ||
-        d.bottleA?.label?.toLowerCase().includes(query) ||
-        d.bottleB?.label?.toLowerCase().includes(query)
-    );
-    renderGallery(filtered);
-});
-
-// ── Utilities ───────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+// UTILITIES
+// ══════════════════════════════════════════════════════════════
 
 function esc(str) {
     const div = document.createElement('div');
@@ -408,9 +508,7 @@ function sanitizeUrl(url) {
     if (!url) return '';
     try {
         const parsed = new URL(url);
-        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-            return parsed.href;
-        }
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.href;
     } catch {}
     return '';
 }
@@ -419,14 +517,10 @@ function showToast(message, type = 'info') {
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
     toast.textContent = message;
-    toastContainer.appendChild(toast);
+    document.getElementById('toast-container').appendChild(toast);
     setTimeout(() => {
         toast.style.opacity = '0';
         toast.style.transition = 'opacity 0.3s';
         setTimeout(() => toast.remove(), 300);
     }, 4000);
 }
-
-// ── Initialize ──────────────────────────────────────────────
-
-initPreview(document.getElementById('preview-container'));
